@@ -233,6 +233,46 @@ button, input{font:inherit}
 
 .nav__right{display:flex; align-items:center; gap:12px}
 
+.acct{position:relative}
+.acct__panel{
+  position:absolute;
+  top:48px;
+  right:0;
+  min-width:220px;
+  background:rgba(255,255,255,0.92);
+  border:1px solid var(--line);
+  border-radius:16px;
+  box-shadow:var(--shadow2);
+  padding:8px;
+  display:none;
+  z-index:700;
+}
+.acct__panel a,
+.acct__panel button{
+  width:100%;
+  display:flex;
+  padding:10px 12px;
+  border-radius:12px;
+  font-size:13px;
+  color:rgba(27,27,28,0.85);
+  transition:background 160ms var(--ease), transform 160ms var(--ease);
+  border:0;
+  background:transparent;
+  cursor:pointer;
+  text-align:left;
+}
+.acct__panel a:hover,
+.acct__panel button:hover{
+  background:rgba(215,154,163,0.14);
+  transform:translateX(2px);
+}
+.acct.is-open .acct__panel{display:block}
+.acct__logout{
+  border-top:1px solid rgba(27,27,28,0.10);
+  margin-top:6px;
+  padding-top:12px;
+}
+
 .search{position:relative; display:flex; align-items:center}
 .search__input{
   width:min(300px, 34vw);
@@ -748,6 +788,143 @@ button, input{font:inherit}
 .form__actions{display:flex; gap:10px; margin-top:12px; flex-wrap:wrap}
 .note{margin:10px 0 0; font-size:12px; color:rgba(27,27,28,0.62)}
 
+/* Auth */
+.authWrap{
+  min-height:calc(70vh - 40px);
+  display:grid;
+  place-items:center;
+  padding:22px 0 10px;
+}
+.authCard{
+  width:min(460px, 100%);
+  background:rgba(255,255,255,0.88);
+  border:1px solid rgba(27,27,28,0.10);
+  border-radius:28px;
+  box-shadow:var(--shadow);
+  padding:18px;
+}
+.authCard__head{
+  padding:8px 8px 4px;
+}
+.authTitle{
+  margin:0;
+  font-family:"Playfair Display", serif;
+  font-size:28px;
+}
+.authSub{
+  margin:10px 0 0;
+  color:rgba(27,27,28,0.70);
+  font-size:13px;
+  line-height:1.7;
+}
+.authForm{
+  margin-top:14px;
+  display:grid;
+  gap:12px;
+}
+.input{
+  display:flex;
+  align-items:center;
+  gap:10px;
+  border:1px solid rgba(27,27,28,0.14);
+  background:rgba(255,255,255,0.90);
+  border-radius:18px;
+  padding:12px 12px;
+  transition:box-shadow 170ms var(--ease), border-color 170ms var(--ease), transform 170ms var(--ease);
+}
+.input:focus-within{
+  border-color:rgba(215,154,163,0.55);
+  box-shadow:0 0 0 6px rgba(215,154,163,0.16);
+}
+.input input{
+  border:0;
+  outline:none;
+  width:100%;
+  background:transparent;
+}
+.inputBtn{
+  border:1px solid rgba(27,27,28,0.12);
+  background:rgba(255,255,255,0.92);
+  border-radius:14px;
+  padding:8px 10px;
+  cursor:pointer;
+  font-size:12px;
+  transition:transform 160ms var(--ease);
+}
+.inputBtn:hover{transform:translateY(-1px)}
+.row{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:10px;
+  flex-wrap:wrap;
+}
+.check{
+  display:flex;
+  align-items:center;
+  gap:8px;
+  color:rgba(27,27,28,0.74);
+  font-size:13px;
+}
+.link{
+  color:rgba(27,27,28,0.78);
+  border-bottom:1px solid rgba(27,27,28,0.22);
+}
+.link:hover{border-bottom-color:rgba(27,27,28,0.55)}
+.alert{
+  border:1px solid rgba(27,27,28,0.12);
+  background:rgba(215,154,163,0.10);
+  border-radius:18px;
+  padding:10px 12px;
+  color:rgba(27,27,28,0.82);
+  font-size:13px;
+}
+.alert--ok{
+  background:rgba(199,154,96,0.10);
+}
+.help{
+  margin:0;
+  color:rgba(27,27,28,0.62);
+  font-size:12px;
+  line-height:1.6;
+}
+.pwRules{
+  border:1px solid rgba(27,27,28,0.10);
+  background:rgba(255,255,255,0.72);
+  border-radius:18px;
+  padding:12px 12px;
+}
+.pwRules__title{
+  margin:0 0 8px;
+  font-size:12px;
+  letter-spacing:0.14em;
+  text-transform:uppercase;
+  color:rgba(27,27,28,0.62);
+}
+.pwRules ul{margin:0; padding-left:18px; display:grid; gap:6px}
+.pwRules li{font-size:12px; color:rgba(27,27,28,0.72)}
+.ok{color:#2f7d3a}
+.bad{color:#b23a48}
+.otpRow{
+  display:grid;
+  grid-template-columns:1fr auto;
+  gap:10px;
+}
+.otpInput{
+  text-align:center;
+  letter-spacing:0.36em;
+  font-weight:700;
+  font-size:16px;
+}
+.spinner{
+  width:16px;height:16px;
+  border:2px solid rgba(255,255,255,0.35);
+  border-top-color:rgba(255,255,255,0.95);
+  border-radius:50%;
+  animation:spin 700ms linear infinite;
+}
+@keyframes spin{to{transform:rotate(360deg)}}
+
 @media (max-width: 980px){
   .card{grid-column:span 4}
   .hero__grid{grid-template-columns:1fr; min-height:auto}
@@ -789,6 +966,7 @@ button, input{font:inherit}
   .form__grid{grid-template-columns:1fr}
   .footer__bottom{flex-direction:column; align-items:flex-start}
   .card{grid-column:span 6}
+  .authCard{padding:16px}
 }
 
 @media (max-width: 420px){

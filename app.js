@@ -8,6 +8,30 @@ const STORAGE = {
 
 const ADMIN_PIN = "1234"; // demo PIN; change if you want
 
+const API = {
+  signup: "/api/signup",
+  login: "/api/login",
+  logout: "/api/logout",
+  me: "/api/me",
+  sendOtp: "/api/send-otp",
+  verifyOtp: "/api/verify-otp",
+  resetPassword: "/api/reset-password",
+};
+
+const AUTH_STORAGE = {
+  resetToken: "rrb_reset_token_v1",
+  identifier: "rrb_identifier_v1",
+  otpExpiresAt: "rrb_otp_expires_at_v1",
+};
+
+const PRODUCTS_MODE = {
+  source: "local", // "local" | "api"
+  ready: false,
+};
+
+let productsCache = [];
+let productsUnsub = null;
+
 const INR = new Intl.NumberFormat("en-IN", {
   style: "currency",
   currency: "INR",
@@ -247,6 +271,8 @@ function revealSetup() {
 }
 
 function getProducts() {
+  // Always return in-memory cache if API mode is ready.
+  if (PRODUCTS_MODE.source === "api" && PRODUCTS_MODE.ready) return productsCache;
   return readJSON(STORAGE.products, []);
 }
 function setProducts(next) {
@@ -296,6 +322,53 @@ function escapeHTML(s) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
+}
+
+async function apiFetch(url, options = {}) {
+  const res = await fetch(url, {
+    credentials: "include",
+    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+    ...options,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data?.error || "Request failed");
+  return data;
+}
+
+function validatePasswordClient(pw) {
+  const s = String(pw || "");
+  return {
+    min8: s.length >= 8,
+    upper: /[A-Z]/.test(s),
+    lower: /[a-z]/.test(s),
+    number: /\d/.test(s),
+    special: /[^A-Za-z0-9]/.test(s),
+  };
+}
+
+function pwRuleLine(ok, text) {
+  return `<li class="${ok ? "ok" : "bad"}">${ok ? "✔" : "✖"} ${escapeHTML(text)}</li>`;
+}
+
+function authShellHTML(title, subtitle, bodyHTML) {
+  return `
+    <div class="container">
+      <div class="authWrap reveal">
+        <div class="authCard">
+          <div class="authCard__head">
+            <h1 class="authTitle">${escapeHTML(title)}</h1>
+            <p class="authSub">${escapeHTML(subtitle)}</p>
+          </div>
+          ${bodyHTML}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function setAuthNavHint(user) {
+  // Optional: just a toast on login/logout; navbar stays minimal.
+  if (user?.name) toast(`Welcome, ${user.name}`);
 }
 
 function openOverlay() {
@@ -529,6 +602,36 @@ function bindCards(root = document) {
   });
 }
 
+async function createProductCloud(payload) {
+  const body = {
+    name: payload.name,
+    price: payload.price,
+    category: payload.category,
+    description: payload.description,
+    image_url: payload.image_url,
+  };
+  const data = await apiFetch("/api/products", { method: "POST", body: JSON.stringify(body) });
+  return data.product;
+}
+
+async function updateProductCloud(id, patch) {
+  const data = await apiFetch(`/api/products/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(patch) });
+  return data.product;
+}
+
+async function deleteProductCloud(id) {
+  await apiFetch(`/api/products/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+async function uploadImageCloud(file) {
+  const fd = new FormData();
+  fd.append("image", file);
+  const res = await fetch("/api/cloudinary/upload", { method: "POST", credentials: "include", body: fd });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data?.error || "Image upload failed");
+  return data.url;
+}
+
 function renderHome() {
   const products = getProducts();
   const featured = products.filter((p) => ["dresses", "tops", "ethnic"].includes(p.category)).slice(0, 8);
@@ -633,6 +736,71 @@ function renderHome() {
 
   bindCards($("#page"));
   revealSetup();
+}
+
+async function initProductsCloud() {
+  // Try API first; if not configured/available, keep localStorage flow.
+  try {
+    const data = await apiFetch("/api/products");
+    productsCache = Array.isArray(data.products) ? data.products.map(mapDbProductToUi) : [];
+    PRODUCTS_MODE.source = "api";
+    PRODUCTS_MODE.ready = true;
+    setupProductsRealtimeIfPossible();
+  } catch {
+    PRODUCTS_MODE.source = "local";
+    PRODUCTS_MODE.ready = true;
+  }
+}
+
+function mapDbProductToUi(p) {
+  // DB columns: id, name, price, category, description, image_url, created_at
+  return {
+    id: String(p.id),
+    name: p.name,
+    price: Number(p.price),
+    category: p.category,
+    tags: Array.isArray(p.tags) ? p.tags : [],
+    description: p.description || "",
+    image: p.image_url,
+    createdAt: p.created_at || null,
+  };
+}
+
+function setupProductsRealtimeIfPossible() {
+  const cfg = window.__SUPABASE__ || {};
+  const supaGlobal = window.supabase;
+  if (!supaGlobal || !cfg.url || !cfg.anonKey || !cfg.productsTable) return;
+
+  try {
+    const client = supaGlobal.createClient(cfg.url, cfg.anonKey);
+    if (productsUnsub) productsUnsub();
+
+    const channel = client
+      .channel("rrb-products")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: cfg.productsTable },
+        async () => {
+          try {
+            const data = await apiFetch("/api/products");
+            productsCache = Array.isArray(data.products) ? data.products.map(mapDbProductToUi) : [];
+            refreshVisibleProducts();
+          } catch {
+            // ignore
+          }
+        }
+      )
+      .subscribe();
+
+    productsUnsub = () => client.removeChannel(channel);
+  } catch {
+    // ignore realtime setup
+  }
+}
+
+function refreshVisibleProducts() {
+  // Re-render current route so grids update, without changing any UI structure.
+  renderRoute();
 }
 
 function renderCollections() {
@@ -853,6 +1021,438 @@ function renderContact() {
   revealSetup();
 }
 
+function renderLogin() {
+  $("#page").innerHTML = authShellHTML(
+    "Login",
+    "Sign in to Ramya Radha Boutique using your email or phone number.",
+    `
+      <div id="authAlert"></div>
+      <form class="authForm" id="loginForm">
+        <div class="field">
+          <label for="identifier">Email or Phone Number</label>
+          <div class="input">
+            <input id="identifier" autocomplete="username" placeholder="you@example.com or 9897786811" required />
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="password">Password</label>
+          <div class="input">
+            <input id="password" type="password" autocomplete="current-password" placeholder="Enter password" required />
+            <button class="inputBtn" id="togglePw" type="button">Show</button>
+          </div>
+        </div>
+
+        <div class="row">
+          <label class="check"><input id="remember" type="checkbox" /> Remember me</label>
+          <a class="link" href="#/forgot">Forgot Password?</a>
+        </div>
+
+        <button class="btn btn--dark btn--full" id="loginBtn" type="submit">
+          <span id="loginBtnText">Login</span>
+          <span id="loginSpin" class="spinner" style="display:none" aria-hidden="true"></span>
+        </button>
+
+        <p class="help">New here? <a class="link" href="#/signup">Create Account</a></p>
+      </form>
+    `
+  );
+
+  const pw = $("#password");
+  $("#togglePw").addEventListener("click", () => {
+    const on = pw.type === "password";
+    pw.type = on ? "text" : "password";
+    $("#togglePw").textContent = on ? "Hide" : "Show";
+  });
+
+  $("#loginForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    setAuthAlert("");
+    setLoading(true, "login");
+    try {
+      const identifier = $("#identifier").value.trim();
+      const password = $("#password").value;
+      const remember = $("#remember").checked;
+      const data = await apiFetch(API.login, { method: "POST", body: JSON.stringify({ identifier, password, remember }) });
+      setAuthNavHint(data.user);
+      toast("Logged in successfully");
+      location.hash = "#/home";
+    } catch (err) {
+      setAuthAlert(err.message || "Login failed");
+    } finally {
+      setLoading(false, "login");
+    }
+  });
+
+  revealSetup();
+}
+
+function renderSignup() {
+  $("#page").innerHTML = authShellHTML(
+    "Create account",
+    "Join Ramya Radha Boutique for faster checkout and order support.",
+    `
+      <div id="authAlert"></div>
+      <form class="authForm" id="signupForm">
+        <div class="field">
+          <label for="name">Full Name</label>
+          <div class="input"><input id="name" autocomplete="name" placeholder="Your full name" required /></div>
+        </div>
+
+        <div class="field">
+          <label for="email">Email ID</label>
+          <div class="input"><input id="email" type="email" autocomplete="email" placeholder="you@example.com" required /></div>
+        </div>
+
+        <div class="field">
+          <label for="phone">Phone Number</label>
+          <div class="input"><input id="phone" inputmode="numeric" autocomplete="tel" placeholder="10-digit phone" required /></div>
+        </div>
+
+        <div class="field">
+          <label for="pw1">Password</label>
+          <div class="input">
+            <input id="pw1" type="password" autocomplete="new-password" placeholder="Create a strong password" required />
+            <button class="inputBtn" id="togglePw1" type="button">Show</button>
+          </div>
+        </div>
+
+        <div class="pwRules" id="pwRules">
+          <p class="pwRules__title">Password must include</p>
+          <ul id="pwRulesList"></ul>
+        </div>
+
+        <div class="field">
+          <label for="pw2">Confirm Password</label>
+          <div class="input">
+            <input id="pw2" type="password" autocomplete="new-password" placeholder="Confirm password" required />
+            <button class="inputBtn" id="togglePw2" type="button">Show</button>
+          </div>
+        </div>
+
+        <button class="btn btn--dark btn--full" id="signupBtn" type="submit">
+          <span id="signupBtnText">Sign up</span>
+          <span id="signupSpin" class="spinner" style="display:none" aria-hidden="true"></span>
+        </button>
+
+        <p class="help">Already have an account? <a class="link" href="#/login">Login</a></p>
+      </form>
+    `
+  );
+
+  const pw1 = $("#pw1");
+  const pw2 = $("#pw2");
+  const renderRules = () => {
+    const r = validatePasswordClient(pw1.value);
+    $("#pwRulesList").innerHTML = [
+      pwRuleLine(r.min8, "Minimum 8 characters"),
+      pwRuleLine(r.upper, "At least 1 uppercase letter"),
+      pwRuleLine(r.lower, "At least 1 lowercase letter"),
+      pwRuleLine(r.number, "At least 1 number"),
+      pwRuleLine(r.special, "At least 1 special character"),
+    ].join("");
+  };
+  renderRules();
+  pw1.addEventListener("input", renderRules);
+
+  const toggle = (inputId, btnId) => {
+    const input = $(inputId);
+    const btn = $(btnId);
+    btn.addEventListener("click", () => {
+      const on = input.type === "password";
+      input.type = on ? "text" : "password";
+      btn.textContent = on ? "Hide" : "Show";
+    });
+  };
+  toggle("#pw1", "#togglePw1");
+  toggle("#pw2", "#togglePw2");
+
+  $("#signupForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    setAuthAlert("");
+    const rules = validatePasswordClient(pw1.value);
+    const ok = Object.values(rules).every(Boolean);
+    if (!ok) return setAuthAlert("Password does not meet the requirements.");
+    if (pw1.value !== pw2.value) return setAuthAlert("Passwords do not match.");
+
+    setLoading(true, "signup");
+    try {
+      const name = $("#name").value.trim();
+      const email = $("#email").value.trim();
+      const phone = $("#phone").value.trim();
+      const password = pw1.value;
+      const data = await apiFetch(API.signup, { method: "POST", body: JSON.stringify({ name, email, phone, password }) });
+      setAuthNavHint(data.user);
+      toast("Account created");
+      location.hash = "#/home";
+    } catch (err) {
+      setAuthAlert(err.message || "Signup failed");
+    } finally {
+      setLoading(false, "signup");
+    }
+  });
+
+  revealSetup();
+}
+
+function renderForgot() {
+  $("#page").innerHTML = authShellHTML(
+    "Forgot password",
+    "Enter your email or phone number. Choose how you want to receive the OTP.",
+    `
+      <div id="authAlert"></div>
+      <form class="authForm" id="forgotForm">
+        <div class="field">
+          <label for="fpId">Email or Phone Number</label>
+          <div class="input">
+            <input id="fpId" placeholder="you@example.com or 9897786811" required />
+          </div>
+        </div>
+
+        <div class="field">
+          <label>Send OTP via</label>
+          <div class="row">
+            <label class="check"><input type="radio" name="chan" value="email" checked /> Email</label>
+            <label class="check"><input type="radio" name="chan" value="sms" /> SMS</label>
+          </div>
+        </div>
+
+        <button class="btn btn--dark btn--full" id="sendOtpBtn" type="submit">
+          <span id="sendOtpText">Send OTP</span>
+          <span id="sendOtpSpin" class="spinner" style="display:none" aria-hidden="true"></span>
+        </button>
+
+        <p class="help"><a class="link" href="#/login">Back to login</a></p>
+      </form>
+    `
+  );
+
+  $("#forgotForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    setAuthAlert("");
+    setLoading(true, "sendOtp");
+    try {
+      const identifier = $("#fpId").value.trim();
+      const channel = $$("input[name='chan']").find((x) => x.checked)?.value || "email";
+      const data = await apiFetch(API.sendOtp, { method: "POST", body: JSON.stringify({ identifier, channel }) });
+      localStorage.setItem(AUTH_STORAGE.identifier, identifier);
+      localStorage.setItem(AUTH_STORAGE.otpExpiresAt, String(Date.now() + (data.expiresInSec || 180) * 1000));
+      if (data.devOtp) toast(`DEV OTP: ${data.devOtp}`);
+      toast(`OTP sent to ${data.masked}`);
+      location.hash = "#/verify-otp";
+    } catch (err) {
+      setAuthAlert(err.message || "Could not send OTP");
+    } finally {
+      setLoading(false, "sendOtp");
+    }
+  });
+
+  revealSetup();
+}
+
+function renderVerifyOtp() {
+  const identifier = localStorage.getItem(AUTH_STORAGE.identifier) || "";
+  const expiresAt = Number(localStorage.getItem(AUTH_STORAGE.otpExpiresAt) || "0");
+
+  $("#page").innerHTML = authShellHTML(
+    "Verify OTP",
+    "Enter the 6-digit OTP. It expires in a few minutes.",
+    `
+      <div id="authAlert"></div>
+      <form class="authForm" id="otpForm">
+        <div class="field">
+          <label for="otpId">Email or Phone Number</label>
+          <div class="input"><input id="otpId" value="${escapeHTML(identifier)}" placeholder="you@example.com or 9897786811" required /></div>
+        </div>
+
+        <div class="field">
+          <label for="otp">OTP</label>
+          <div class="otpRow">
+            <div class="input"><input id="otp" class="otpInput" inputmode="numeric" placeholder="••••••" required /></div>
+            <button class="btn" id="resendBtn" type="button">Resend</button>
+          </div>
+          <p class="help">Time left: <strong id="otpTimer">--:--</strong></p>
+        </div>
+
+        <button class="btn btn--dark btn--full" id="verifyBtn" type="submit">
+          <span id="verifyText">Verify</span>
+          <span id="verifySpin" class="spinner" style="display:none" aria-hidden="true"></span>
+        </button>
+      </form>
+    `
+  );
+
+  const timerEl = $("#otpTimer");
+  const tick = () => {
+    const left = Math.max(0, expiresAt - Date.now());
+    const s = Math.floor(left / 1000);
+    const mm = String(Math.floor(s / 60)).padStart(2, "0");
+    const ss = String(s % 60).padStart(2, "0");
+    timerEl.textContent = `${mm}:${ss}`;
+    if (left <= 0) setAuthAlert("OTP expired. Please resend OTP.");
+  };
+  tick();
+  const t = window.setInterval(tick, 1000);
+
+  $("#resendBtn").addEventListener("click", async () => {
+    setAuthAlert("");
+    setLoading(true, "sendOtp");
+    try {
+      const id = $("#otpId").value.trim();
+      const data = await apiFetch(API.sendOtp, { method: "POST", body: JSON.stringify({ identifier: id, channel: "email" }) });
+      localStorage.setItem(AUTH_STORAGE.identifier, id);
+      localStorage.setItem(AUTH_STORAGE.otpExpiresAt, String(Date.now() + (data.expiresInSec || 180) * 1000));
+      if (data.devOtp) toast(`DEV OTP: ${data.devOtp}`);
+      toast("OTP resent");
+    } catch (err) {
+      setAuthAlert(err.message || "Could not resend OTP");
+    } finally {
+      setLoading(false, "sendOtp");
+    }
+  });
+
+  $("#otpForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    setAuthAlert("");
+    setLoading(true, "verify");
+    try {
+      const id = $("#otpId").value.trim();
+      const otp = $("#otp").value.trim().replace(/\s+/g, "");
+      const data = await apiFetch(API.verifyOtp, { method: "POST", body: JSON.stringify({ identifier: id, otp }) });
+      localStorage.setItem(AUTH_STORAGE.resetToken, data.resetToken);
+      localStorage.setItem(AUTH_STORAGE.identifier, id);
+      toast("OTP verified");
+      location.hash = "#/reset-password";
+    } catch (err) {
+      setAuthAlert(err.message || "OTP verification failed");
+    } finally {
+      setLoading(false, "verify");
+      window.clearInterval(t);
+    }
+  });
+
+  revealSetup();
+}
+
+function renderResetPassword() {
+  $("#page").innerHTML = authShellHTML(
+    "Reset password",
+    "Set a new password for your account. Make it strong and unique.",
+    `
+      <div id="authAlert"></div>
+      <form class="authForm" id="resetForm">
+        <div class="field">
+          <label for="rp1">New password</label>
+          <div class="input">
+            <input id="rp1" type="password" autocomplete="new-password" placeholder="New password" required />
+            <button class="inputBtn" id="toggleRp1" type="button">Show</button>
+          </div>
+        </div>
+
+        <div class="pwRules" id="rpRules">
+          <p class="pwRules__title">Password must include</p>
+          <ul id="rpRulesList"></ul>
+        </div>
+
+        <div class="field">
+          <label for="rp2">Confirm password</label>
+          <div class="input">
+            <input id="rp2" type="password" autocomplete="new-password" placeholder="Confirm password" required />
+            <button class="inputBtn" id="toggleRp2" type="button">Show</button>
+          </div>
+        </div>
+
+        <button class="btn btn--dark btn--full" id="resetBtn" type="submit">
+          <span id="resetText">Reset password</span>
+          <span id="resetSpin" class="spinner" style="display:none" aria-hidden="true"></span>
+        </button>
+
+        <p class="help"><a class="link" href="#/login">Back to login</a></p>
+      </form>
+    `
+  );
+
+  const rp1 = $("#rp1");
+  const rp2 = $("#rp2");
+  const renderRules = () => {
+    const r = validatePasswordClient(rp1.value);
+    $("#rpRulesList").innerHTML = [
+      pwRuleLine(r.min8, "Minimum 8 characters"),
+      pwRuleLine(r.upper, "At least 1 uppercase letter"),
+      pwRuleLine(r.lower, "At least 1 lowercase letter"),
+      pwRuleLine(r.number, "At least 1 number"),
+      pwRuleLine(r.special, "At least 1 special character"),
+    ].join("");
+  };
+  renderRules();
+  rp1.addEventListener("input", renderRules);
+
+  const toggle = (input, btn) => {
+    btn.addEventListener("click", () => {
+      const on = input.type === "password";
+      input.type = on ? "text" : "password";
+      btn.textContent = on ? "Hide" : "Show";
+    });
+  };
+  toggle(rp1, $("#toggleRp1"));
+  toggle(rp2, $("#toggleRp2"));
+
+  $("#resetForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    setAuthAlert("");
+    const rules = validatePasswordClient(rp1.value);
+    const ok = Object.values(rules).every(Boolean);
+    if (!ok) return setAuthAlert("Password does not meet the requirements.");
+    if (rp1.value !== rp2.value) return setAuthAlert("Passwords do not match.");
+
+    const resetToken = localStorage.getItem(AUTH_STORAGE.resetToken) || "";
+    if (!resetToken) return setAuthAlert("Reset session expired. Please request OTP again.");
+
+    setLoading(true, "reset");
+    try {
+      await apiFetch(API.resetPassword, { method: "POST", body: JSON.stringify({ resetToken, password: rp1.value }) });
+      localStorage.removeItem(AUTH_STORAGE.resetToken);
+      localStorage.removeItem(AUTH_STORAGE.otpExpiresAt);
+      toast("Password reset successfully");
+      setAuthAlert("Password updated. Please log in with your new password.", true);
+      window.setTimeout(() => (location.hash = "#/login"), 900);
+    } catch (err) {
+      setAuthAlert(err.message || "Reset failed");
+    } finally {
+      setLoading(false, "reset");
+    }
+  });
+
+  revealSetup();
+}
+
+function setAuthAlert(message, ok = false) {
+  const el = $("#authAlert");
+  if (!el) return;
+  if (!message) {
+    el.innerHTML = "";
+    return;
+  }
+  el.innerHTML = `<div class="alert ${ok ? "alert--ok" : ""}">${escapeHTML(message)}</div>`;
+}
+
+function setLoading(on, kind) {
+  const map = {
+    login: ["#loginBtnText", "#loginSpin"],
+    signup: ["#signupBtnText", "#signupSpin"],
+    sendOtp: ["#sendOtpText", "#sendOtpSpin"],
+    verify: ["#verifyText", "#verifySpin"],
+    reset: ["#resetText", "#resetSpin"],
+  };
+  const ids = map[kind];
+  if (!ids) return;
+  const [textId, spinId] = ids;
+  const t = $(textId);
+  const s = $(spinId);
+  if (t) t.style.opacity = on ? "0.8" : "1";
+  if (s) s.style.display = on ? "inline-block" : "none";
+}
+
 function isAdminSession() {
   return readJSON(STORAGE.adminSession, { ok: false })?.ok === true;
 }
@@ -1003,36 +1603,64 @@ function renderAdmin() {
       return;
     }
 
-    let image = imgUrl;
-    if (file) {
-      if (file.size > 1_800_000) {
-        toast("Image too large. Please use a smaller file (under ~1.8MB).");
+    try {
+      // Cloud mode: upload image to Cloudinary and store product in DB.
+      if (PRODUCTS_MODE.source === "api") {
+        let imageUrl = imgUrl;
+        if (file) imageUrl = await uploadImageCloud(file);
+        if (!imageUrl) {
+          toast("Please upload an image or provide an image URL.");
+          return;
+        }
+
+        await createProductCloud({
+          name,
+          price: Math.round(price),
+          category,
+          description,
+          image_url: imageUrl,
+        });
+        toast("Product uploaded");
+        // Re-fetch products so the storefront updates immediately.
+        await initProductsCloud();
+        renderAdmin();
         return;
       }
-      image = await fileToDataURL(file);
+
+      // Local fallback (existing behavior)
+      let image = imgUrl;
+      if (file) {
+        if (file.size > 1_800_000) {
+          toast("Image too large. Please use a smaller file (under ~1.8MB).");
+          return;
+        }
+        image = await fileToDataURL(file);
+      }
+
+      if (!image) {
+        toast("Please upload an image or provide an image URL.");
+        return;
+      }
+
+      const next = [
+        {
+          id: uid(),
+          name,
+          price: Math.round(price),
+          category,
+          tags,
+          description,
+          image,
+        },
+        ...getProducts(),
+      ];
+
+      setProducts(next);
+      toast("Product uploaded");
+      renderAdmin();
+    } catch (err) {
+      toast(err.message || "Upload failed");
     }
-
-    if (!image) {
-      toast("Please upload an image or provide an image URL.");
-      return;
-    }
-
-    const next = [
-      {
-        id: uid(),
-        name,
-        price: Math.round(price),
-        category,
-        tags,
-        description,
-        image,
-      },
-      ...getProducts(),
-    ];
-
-    setProducts(next);
-    toast("Product uploaded");
-    renderAdmin();
   });
 
   renderAdminGrid();
@@ -1047,6 +1675,15 @@ function renderAdminGrid() {
   $$(".card", grid).forEach((card) => {
     const id = card.dataset.id;
     const body = $(".card__body", card);
+
+    const edit = document.createElement("button");
+    edit.className = "btn";
+    edit.type = "button";
+    edit.textContent = "Edit";
+    edit.style.width = "100%";
+    edit.style.marginTop = "10px";
+    body.appendChild(edit);
+
     const del = document.createElement("button");
     del.className = "btn btn--ghost";
     del.type = "button";
@@ -1054,11 +1691,66 @@ function renderAdminGrid() {
     del.style.width = "100%";
     del.style.marginTop = "10px";
     body.appendChild(del);
+
+    edit.addEventListener("click", async () => {
+      const p = getProducts().find((x) => x.id === id);
+      if (!p) return;
+
+      const newName = prompt("Product name", p.name) ?? p.name;
+      const newPriceRaw = prompt("Price (INR)", String(p.price)) ?? String(p.price);
+      const newPrice = Number(newPriceRaw);
+      const newDesc = prompt("Description", p.description || "") ?? (p.description || "");
+      const newCategory = prompt("Category (dresses/tops/ethnic/new-arrivals)", p.category) ?? p.category;
+      if (!newName.trim() || !Number.isFinite(newPrice) || newPrice <= 0) {
+        toast("Invalid name or price");
+        return;
+      }
+
+      try {
+        if (PRODUCTS_MODE.source === "api") {
+          await updateProductCloud(id, {
+            name: newName.trim(),
+            price: Math.round(newPrice),
+            description: newDesc.trim(),
+            category: newCategory.trim(),
+          });
+          await initProductsCloud();
+          toast("Updated");
+          renderAdmin();
+          return;
+        }
+
+        const next = getProducts().map((x) =>
+          x.id === id
+            ? { ...x, name: newName.trim(), price: Math.round(newPrice), description: newDesc.trim(), category: newCategory.trim() }
+            : x
+        );
+        setProducts(next);
+        toast("Updated");
+        renderAdmin();
+      } catch (err) {
+        toast(err.message || "Update failed");
+      }
+    });
+
     del.addEventListener("click", () => {
-      const next = getProducts().filter((p) => p.id !== id);
-      setProducts(next);
-      toast("Deleted");
-      renderAdmin();
+      (async () => {
+        try {
+          if (PRODUCTS_MODE.source === "api") {
+            await deleteProductCloud(id);
+            await initProductsCloud();
+            toast("Deleted");
+            renderAdmin();
+            return;
+          }
+          const next = getProducts().filter((p) => p.id !== id);
+          setProducts(next);
+          toast("Deleted");
+          renderAdmin();
+        } catch (err) {
+          toast(err.message || "Delete failed");
+        }
+      })();
     });
   });
 }
@@ -1089,6 +1781,11 @@ function renderRoute() {
     if (a === "about") return renderAbout();
     if (a === "contact") return renderContact();
     if (a === "admin") return renderAdmin();
+    if (a === "login") return renderLogin();
+    if (a === "signup") return renderSignup();
+    if (a === "forgot") return renderForgot();
+    if (a === "verify-otp") return renderVerifyOtp();
+    if (a === "reset-password") return renderResetPassword();
     if (a === "new-arrivals") return renderNewArrivals(route.query);
     if (a === "category" && b) return renderCategory(b, route.query);
     return renderHome();
@@ -1125,6 +1822,8 @@ function setupGlobalUI() {
     logo.addEventListener("error", fallback, { once: true });
     if (!logo.getAttribute("src")) fallback();
   }
+
+  setupAccountMenu();
 
   $("#overlay").addEventListener("click", () => {
     closeModal();
@@ -1175,8 +1874,67 @@ function setupGlobalUI() {
   });
 }
 
+function setupAccountMenu() {
+  const area = $("#accountArea");
+  const btn = $("#accountBtn");
+  const panel = $("#accountPanel");
+  const label = $("#accountLabel");
+  const primary = $("#accountPrimaryLink");
+  const secondary = $("#accountSecondaryLink");
+  const logout = $("#accountLogoutBtn");
+  if (!area || !btn || !panel || !label || !primary || !secondary || !logout) return;
+
+  const open = (on) => {
+    area.classList.toggle("is-open", on);
+    btn.setAttribute("aria-expanded", String(on));
+    syncOverlay();
+  };
+
+  btn.addEventListener("click", () => open(!area.classList.contains("is-open")));
+
+  document.addEventListener("click", (e) => {
+    if (!area.contains(e.target)) open(false);
+  });
+
+  const render = (user) => {
+    if (user?.name) {
+      label.textContent = `Hi, ${user.name.split(" ")[0]}`;
+      primary.textContent = "My account";
+      primary.setAttribute("href", "#/home");
+      secondary.textContent = "Forgot password";
+      secondary.setAttribute("href", "#/forgot");
+      logout.hidden = false;
+    } else {
+      label.textContent = "Login";
+      primary.textContent = "Login";
+      primary.setAttribute("href", "#/login");
+      secondary.textContent = "Create account";
+      secondary.setAttribute("href", "#/signup");
+      logout.hidden = true;
+    }
+  };
+
+  logout.addEventListener("click", async () => {
+    try {
+      await apiFetch(API.logout, { method: "POST" });
+      render(null);
+      toast("Logged out");
+      open(false);
+      // If they were on auth pages, keep them there; otherwise stay put.
+    } catch (err) {
+      toast(err.message || "Logout failed");
+    }
+  });
+
+  // initial state from backend session cookie
+  apiFetch(API.me)
+    .then((data) => render(data.user))
+    .catch(() => render(null));
+}
+
 function main() {
   ensureSeed();
+  initProductsCloud();
   setupNav();
   setupGlobalUI();
   syncCartUI();

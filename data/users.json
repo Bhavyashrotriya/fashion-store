@@ -1,0 +1,21 @@
+{
+  "users": [
+    {
+      "id": "VR1DCmRHay5tnRGN",
+      "name": "Bhavya Shrotriya",
+      "email": "bhavyashrotriya02@gmail.com",
+      "phone": "7895694765",
+      "passwordHash": "$2a$12$8vmQO7xaEeu3ykNkH8yyOuGQhaaGuFTKj/0H543rh9JXVypEk90yW",
+      "createdAt": "2026-03-18T19:28:30.669Z"
+    },
+    {
+      "id": "fe5_m7Q7XmM95PN3",
+      "name": "Test User",
+      "email": "test1773861587793@example.com",
+      "phone": "9927950505",
+      "passwordHash": "$2a$12$9gSkvuPqEltEXeJaouqIIOpdNGC0Woj/M4TnjlFjwr7zRCrKKLv.S",
+      "createdAt": "2026-03-18T19:19:48.506Z",
+      "updatedAt": "2026-03-18T19:19:49.895Z"
+    }
+  ]
+}

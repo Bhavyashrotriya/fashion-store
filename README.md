@@ -4,16 +4,22 @@ A modern, elegant, responsive women’s clothing boutique website inspired by pr
 
 ## Run
 
-You can open `index.html` directly, but for best results use a simple local server:
+This project now includes a secure auth backend (Login/Signup/OTP reset).
 
-- VS Code / Cursor: install “Live Server” and click **Go Live**
-- Or with Node:
+### Start the full app (recommended)
 
 ```bash
-npx serve .
+npm install
+npm run dev
 ```
 
-Then open the shown local URL.
+Then open `http://localhost:5178`.
+
+### Auth pages
+
+- Login: `#/login`
+- Signup: `#/signup`
+- Forgot password: `#/forgot` → `#/verify-otp` → `#/reset-password`
 
 ## Features
 
@@ -24,6 +30,7 @@ Then open the shown local URL.
 - **Add to cart** drawer with quantity controls + subtotal
 - Filtering by category/tags and instant search
 - Footer social links + contact details + newsletter signup
+- Secure authentication: Signup, Login (email/phone), Forgot password (OTP + reset)
 
 ## Admin panel (Product upload)
 
@@ -43,3 +50,12 @@ This project uses browser `localStorage`:
 
 No backend is required.
 
+## Auth backend security notes
+
+- Passwords are hashed with `bcryptjs` (never stored in plain text)
+- OTP is 6-digit, expires in ~3 minutes, rate-limited
+- Sessions use an httpOnly cookie (JWT)
+- For production, set environment variables:
+  - `JWT_SECRET` (required)
+  - `NODE_ENV=production`
+  - `COOKIE_SECURE=true` (if behind HTTPS)

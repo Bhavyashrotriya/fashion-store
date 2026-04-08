@@ -90,6 +90,18 @@
                 </button>
               </div>
 
+              <div class="acct" id="accountArea">
+                <button class="cartBtn" id="accountBtn" type="button" aria-label="Account" aria-expanded="false">
+                  <span class="cartBtn__icon" aria-hidden="true">👤</span>
+                  <span class="cartBtn__text" id="accountLabel">Account</span>
+                </button>
+                <div class="acct__panel" id="accountPanel" role="menu" aria-label="Account menu">
+                  <a role="menuitem" id="accountPrimaryLink" href="#/login">Login</a>
+                  <a role="menuitem" id="accountSecondaryLink" href="#/signup">Create account</a>
+                  <button role="menuitem" class="acct__logout" id="accountLogoutBtn" type="button" hidden>Logout</button>
+                </div>
+              </div>
+
               <button class="cartBtn" id="cartBtn" type="button" aria-label="Open cart">
                 <span class="cartBtn__icon" aria-hidden="true">🛍</span>
                 <span class="cartBtn__text">Cart</span>
@@ -189,5 +201,7 @@
     </aside>
 
     <script src="./app.js" defer></script>
+    <script src="./supabase-config.js"></script>
+    <script src="https://unpkg.com/@supabase/supabase-js@2"></script>
   </body>
 </html>
