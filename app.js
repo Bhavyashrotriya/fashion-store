@@ -271,12 +271,12 @@ function revealSetup() {
 }
 
 function getProducts() {
-  // Always return in-memory cache if API mode is ready.
-  if (PRODUCTS_MODE.source === "api" && PRODUCTS_MODE.ready) return productsCache;
-  return readJSON(STORAGE.products, []);
+  return productsCache;
 }
 function setProducts(next) {
-  writeJSON(STORAGE.products, next);
+  // Ignored or can be kept for admin fallback if necessary.
+  // Actually, we must update productsCache locally so that renderAdmin updates immediately if we don't await re-fetch.
+  productsCache = next;
 }
 
 function getCart() {
@@ -327,6 +327,7 @@ function escapeHTML(s) {
 async function apiFetch(url, options = {}) {
   const res = await fetch(url, {
     credentials: "include",
+    cache: "no-store",
     headers: { "Content-Type": "application/json", ...(options.headers || {}) },
     ...options,
   });
@@ -607,6 +608,7 @@ async function createProductCloud(payload) {
     name: payload.name,
     price: payload.price,
     category: payload.category,
+    tags: payload.tags,
     description: payload.description,
     image_url: payload.image_url,
   };
@@ -990,33 +992,71 @@ function renderContact() {
           </div>
         </div>
 
-        <div class="form reveal">
+        <form class="form reveal" id="contactForm">
           <div class="form__grid">
             <div class="field">
               <label for="cName">Name</label>
-              <input id="cName" placeholder="Your name" />
+              <input id="cName" required placeholder="Your name" />
             </div>
             <div class="field">
               <label for="cEmail">Email</label>
-              <input id="cEmail" type="email" placeholder="you@example.com" />
+              <input id="cEmail" type="email" required placeholder="you@example.com" />
             </div>
           </div>
           <div class="field" style="margin-top:12px">
             <label for="cMsg">Message</label>
-            <textarea id="cMsg" placeholder="Tell us what you’re looking for..."></textarea>
+            <textarea id="cMsg" required placeholder="Tell us what you’re looking for..."></textarea>
           </div>
           <div class="form__actions">
-            <button class="btn btn--dark" id="contactSend" type="button">Send</button>
+            <button class="btn btn--dark" id="contactSend" type="submit">Send Message</button>
             <a class="btn btn--ghost" href="#/home">Back to home</a>
           </div>
-          <p class="note">This is a demo form. We’ll show a confirmation toast.</p>
-        </div>
+          <p class="note" id="contactNote">We'll get back to you soon.</p>
+        </form>
       </section>
     </div>
   `;
 
-  $("#contactSend").addEventListener("click", () => {
-    toast("Thanks! We’ll get back to you shortly.");
+  $("#contactForm").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const btn = $("#contactSend");
+    const name = $("#cName").value;
+    const email = $("#cEmail").value;
+    const msg = $("#cMsg").value;
+
+    btn.textContent = "Sending...";
+    btn.disabled = true;
+
+    const env = window.__ENV__ || {};
+    const serviceID = env.NEXT_PUBLIC_EMAILJS_SERVICE_ID;
+    const templateID = env.NEXT_PUBLIC_EMAILJS_TEMPLATE_ID;
+    const publicKey = env.NEXT_PUBLIC_EMAILJS_PUBLIC_KEY;
+
+    if (!publicKey || !serviceID || !templateID) {
+      console.warn("EmailJS credentials missing. Check .env variables.");
+      toast("Success (Demo): " + msg.slice(0, 20) + "...");
+      $("#contactForm").reset();
+      btn.textContent = "Send Message";
+      btn.disabled = false;
+      return;
+    }
+
+    emailjs.init(publicKey);
+    const templateParams = { from_name: name, reply_to: email, message: msg };
+    
+    emailjs.send(serviceID, templateID, templateParams)
+      .then(() => {
+        toast("Email sent successfully!");
+        $("#contactForm").reset();
+      })
+      .catch((err) => {
+        console.error("EmailJS Error:", err);
+        toast("Failed to send email. Check console.");
+      })
+      .finally(() => {
+        btn.textContent = "Send Message";
+        btn.disabled = false;
+      });
   });
   revealSetup();
 }
@@ -1585,6 +1625,40 @@ function renderAdmin() {
     renderAdmin();
   });
 
+  $("#pImg").addEventListener("change", async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    toast("Uploading image to Cloudinary...");
+    const fd = new FormData();
+    fd.append("file", file);
+    fd.append("upload_preset", "fashion-store");
+
+    try {
+      const envName = "NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME";
+      const cloudName = 
+          (typeof process !== "undefined" && process.env && process.env[envName]) 
+          || (window.__ENV__ && window.__ENV__[envName]) 
+          || window[envName] 
+          || "fashion-store";
+
+      const res = await fetch(`https://api.cloudinary.com/v1_1/${cloudName}/image/upload`, {
+        method: "POST",
+        body: fd
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error?.message || "Upload failed");
+      
+      $("#pImgUrl").value = data.secure_url;
+      // Clear the file input so it doesn't double-upload via backend
+      $("#pImg").value = ""; 
+      toast("Image uploaded automatically!");
+    } catch (err) {
+      toast("Cloudinary upload Error: " + err.message);
+      console.error(err);
+    }
+  });
+
   $("#saveProduct").addEventListener("click", async () => {
     const name = $("#pName").value.trim();
     const price = Number($("#pPrice").value);
@@ -1617,6 +1691,7 @@ function renderAdmin() {
           name,
           price: Math.round(price),
           category,
+          tags,
           description,
           image_url: imageUrl,
         });
@@ -1780,7 +1855,13 @@ function renderRoute() {
     if (a === "collections") return renderCollections();
     if (a === "about") return renderAbout();
     if (a === "contact") return renderContact();
-    if (a === "admin") return renderAdmin();
+    if (a === "admin") {
+      if (b === "upload") return renderAdminUpload();
+      return renderAdmin();
+    }
+    if (a === "gallery") return renderGallery();
+    if (a === "checkout") return renderCheckout();
+    if (a === "order-success") return renderOrderSuccess(route.query);
     if (a === "login") return renderLogin();
     if (a === "signup") return renderSignup();
     if (a === "forgot") return renderForgot();
@@ -1792,6 +1873,318 @@ function renderRoute() {
   };
 
   pageTransition(render);
+}
+
+
+function renderAdminUpload() {
+  const env = window.__ENV__ || {};
+  const cloudName = env.NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME;
+
+  $("#page").innerHTML = `
+    <div class="container">
+      <section class="section reveal">
+        <div class="section__head">
+          <div>
+            <h1 class="section__title" style="font-size:30px">Upload Photos</h1>
+            <p class="section__desc">Admin Dashboard - Cloudinary Upload</p>
+          </div>
+        </div>
+        <div style="margin-bottom: 20px;">
+          <button class="btn btn--dark" id="cloudinaryUploadWidget" type="button">Click to Upload</button>
+        </div>
+        <div class="grid" id="uploadedPreviewGrid" style="gap: 16px;"></div>
+      </section>
+    </div>
+  `;
+
+  const btn = $("#cloudinaryUploadWidget");
+  if (cloudName && window.cloudinary) {
+    const uploadWidget = window.cloudinary.createUploadWidget({
+      cloudName: cloudName,
+      uploadPreset: 'fashion-store',
+      sources: ['local', 'url']
+    }, (error, result) => {
+      if (!error && result && result.event === "success") {
+        toast("Upload successful!");
+        const div = document.createElement("div");
+        div.innerHTML = `<img class="card__img" src="${result.info.secure_url}" style="border-radius: 8px; width: 100%; aspect-ratio: 3/4; object-fit: cover;" />`;
+        $("#uploadedPreviewGrid").appendChild(div);
+      }
+    });
+
+    btn.addEventListener("click", () => {
+      uploadWidget.open();
+    });
+  } else {
+    btn.textContent = "Cloudinary not configured";
+    btn.disabled = true;
+  }
+  revealSetup();
+}
+
+function renderGallery() {
+  $("#page").innerHTML = `
+    <div class="container">
+      <section class="section reveal">
+        <div class="section__head">
+          <div>
+            <h1 class="section__title" style="font-size:30px">Gallery</h1>
+            <p class="section__desc">All uploaded images from Cloudinary.</p>
+          </div>
+        </div>
+        <div class="grid" id="galleryGrid">Loading...</div>
+      </section>
+    </div>
+  `;
+
+  apiFetch("/api/cloudinary/gallery")
+    .then(data => {
+      const grid = $("#galleryGrid");
+      if (data && data.images && data.images.length > 0) {
+        grid.innerHTML = data.images.map(img => `
+          <article class="card reveal">
+            <div class="card__media" style="aspect-ratio: 3/4;">
+              <img class="card__img" src="${escapeHTML(img)}" alt="Gallery item" loading="lazy" />
+            </div>
+          </article>
+        `).join("");
+      } else {
+        grid.innerHTML = "<p>No images found in gallery.</p>";
+      }
+      revealSetup();
+    })
+    .catch(err => {
+      $("#galleryGrid").innerHTML = "<p>Failed to load gallery.</p>";
+    });
+}
+
+function renderCheckout() {
+  const cart = getCart();
+  const products = getProducts();
+  const entries = Object.entries(cart).filter(([, q]) => q > 0);
+
+  if (entries.length === 0) {
+    location.hash = "#/home";
+    return;
+  }
+
+  let subtotal = 0;
+  const items = entries.map(([id, qty]) => {
+    const p = products.find((x) => x.id === id);
+    if (p) subtotal += (p.price || 0) * qty;
+    return { product: p, qty };
+  }).filter(i => i.product);
+
+  const shipping = subtotal > 1999 ? 0 : 150;
+  const total = subtotal + shipping;
+
+  $("#page").innerHTML = `
+    <div class="container" style="max-width: 800px;">
+      <section class="section reveal">
+        <h1 class="section__title" style="margin-bottom:20px;">Checkout</h1>
+        
+        <div class="checkout-grid" style="display: grid; gap: 32px; grid-template-columns: 1fr; @media(min-width: 768px){ grid-template-columns: 1.5fr 1fr; }">
+          
+          <div class="checkout-form">
+            <h2 style="font-size: 1.2rem; margin-bottom: 16px;">Delivery Details</h2>
+            <form id="checkoutForm" class="form">
+              <div class="field">
+                <label>Full Name</label>
+                <input id="coName" required placeholder="Jane Doe" />
+              </div>
+              <div class="form__grid">
+                <div class="field">
+                  <label>Email</label>
+                  <input id="coEmail" type="email" required placeholder="you@example.com" />
+                </div>
+                <div class="field">
+                  <label>Phone</label>
+                  <input id="coPhone" type="tel" required pattern="[0-9]{10}" placeholder="10 digit mobile" />
+                </div>
+              </div>
+              
+              <h3 style="font-size: 1rem; margin: 16px 0 8px;">Address</h3>
+              <div class="field">
+                <input id="coAddr" required placeholder="Flat, House no., Building, Company, Apartment" />
+              </div>
+              <div class="form__grid">
+                <div class="field">
+                  <input id="coCity" required placeholder="City" />
+                </div>
+                <div class="field">
+                  <input id="coState" required placeholder="State" />
+                </div>
+                <div class="field">
+                  <input id="coZip" required type="text" pattern="[0-9]{6}" placeholder="Pincode" />
+                </div>
+              </div>
+              
+              <button class="btn btn--dark btn--full" style="margin-top: 24px;" type="submit" id="payBtn">Proceed to Pay ${money(total)}</button>
+            </form>
+          </div>
+
+          <div class="checkout-summary" style="background: var(--surface); padding: 24px; border-radius: 8px;">
+            <h2 style="font-size: 1.2rem; margin-bottom: 16px;">Order Summary</h2>
+            <div style="display: flex; flex-direction: column; gap: 12px; margin-bottom: 16px;">
+              ${items.map(i => `
+                <div style="display: flex; gap: 12px;">
+                  <img src="${escapeHTML(i.product.image)}" style="width: 60px; height: 80px; object-fit: cover; border-radius: 4px;" />
+                  <div>
+                    <strong style="display: block; font-size: 0.95rem;">${escapeHTML(i.product.name)}</strong>
+                    <span class="muted" style="font-size: 0.85rem;">Qty: ${i.qty}</span>
+                    <div style="font-size: 0.95rem; margin-top: 4px;">${money(i.product.price * i.qty)}</div>
+                  </div>
+                </div>
+              `).join("")}
+            </div>
+            
+            <div style="border-top: 1px solid var(--border); padding-top: 16px; display: flex; flex-direction: column; gap: 8px;">
+              <div style="display: flex; justify-content: space-between;">
+                <span class="muted">Subtotal</span>
+                <span>${money(subtotal)}</span>
+              </div>
+              <div style="display: flex; justify-content: space-between;">
+                <span class="muted">Shipping</span>
+                <span>${shipping === 0 ? 'Free' : money(shipping)}</span>
+              </div>
+              <div style="display: flex; justify-content: space-between; font-weight: bold; font-size: 1.1rem; border-top: 1px solid var(--border); padding-top: 8px; margin-top: 8px;">
+                <span>Total</span>
+                <span>${money(total)}</span>
+              </div>
+            </div>
+          </div>
+          
+        </div>
+      </section>
+    </div>
+  `;
+
+  $("#checkoutForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const btn = $("#payBtn");
+    btn.disabled = true;
+    btn.textContent = "Processing...";
+
+    const customerDetails = {
+      name: $("#coName").value,
+      email: $("#coEmail").value,
+      phone: $("#coPhone").value,
+      address: {
+        street: $("#coAddr").value,
+        city: $("#coCity").value,
+        state: $("#coState").value,
+        zip: $("#coZip").value
+      }
+    };
+
+    try {
+      const res = await apiFetch("/api/create-order", {
+        method: "POST",
+        body: JSON.stringify({ amount: total })
+      });
+
+      if (!res.ok || !res.order) {
+        throw new Error("Failed to initialize payment");
+      }
+
+      const env = window.__ENV__ || {};
+      
+      const options = {
+        key: env.NEXT_PUBLIC_RAZORPAY_KEY_ID,
+        amount: res.order.amount,
+        currency: res.order.currency,
+        name: "Ramya Radha Boutique",
+        description: "Order Payment",
+        order_id: res.order.id,
+        handler: async function (response) {
+          try {
+            const captureRes = await apiFetch("/api/capture-order", {
+              method: "POST",
+              body: JSON.stringify({
+                razorpay_order_id: response.razorpay_order_id,
+                razorpay_payment_id: response.razorpay_payment_id,
+                razorpay_signature: response.razorpay_signature,
+                customerDetails,
+                items: items.map(i => ({ id: i.product.id, name: i.product.name, price: i.product.price, qty: i.qty })),
+                amount: total
+              })
+            });
+
+            if (captureRes.ok) {
+              setCart({});
+              location.hash = "#/order-success?id=" + encodeURIComponent(captureRes.savedOrder?.id || response.razorpay_order_id) + "&name=" + encodeURIComponent(customerDetails.name) + "&email=" + encodeURIComponent(customerDetails.email);
+            } else {
+              throw new Error("Order capture failed");
+            }
+          } catch (err) {
+            console.error(err);
+            toast("Payment captured, but failed to save order details.");
+          }
+        },
+        prefill: {
+          name: customerDetails.name,
+          email: customerDetails.email,
+          contact: customerDetails.phone
+        },
+        theme: {
+          color: "#222222"
+        }
+      };
+
+      const rzp = new window.Razorpay(options);
+      rzp.on('payment.failed', function (response){
+        toast("Payment failed. Please try again.");
+        btn.disabled = false;
+        btn.textContent = `Proceed to Pay ${money(total)}`;
+      });
+      rzp.open();
+    } catch (err) {
+      console.error(err);
+      toast("Error starting payment.");
+      btn.disabled = false;
+      btn.textContent = `Proceed to Pay ${money(total)}`;
+    }
+  });
+
+  revealSetup();
+}
+
+function renderOrderSuccess(query) {
+  const id = query.id || "Unknown";
+  const name = query.name || "Customer";
+  const email = query.email || "";
+
+  $("#page").innerHTML = `
+    <div class="container" style="text-align: center; max-width: 600px; padding: 60px 20px;">
+      <div style="font-size: 48px; margin-bottom: 20px;">🎉</div>
+      <h1 class="section__title">Payment Successful!</h1>
+      <p class="section__desc" style="margin-top: 16px;">Thank you for your order, ${escapeHTML(name)}.</p>
+      
+      <div style="background: var(--surface); padding: 24px; border-radius: 8px; margin: 32px 0;">
+        <p class="muted" style="margin: 0 0 8px;">Order Reference ID</p>
+        <strong style="font-size: 1.1rem;">${escapeHTML(id)}</strong>
+      </div>
+      
+      <p style="margin-bottom: 32px;">An order confirmation has been emailed to you. Estimated delivery is 3-5 business days.</p>
+      
+      <a class="btn btn--dark" href="#/home">Continue Shopping</a>
+    </div>
+  `;
+
+  const env = window.__ENV__ || {};
+  if (email && env.NEXT_PUBLIC_EMAILJS_PUBLIC_KEY && env.NEXT_PUBLIC_EMAILJS_SERVICE_ID && env.NEXT_PUBLIC_EMAILJS_TEMPLATE_ID) {
+    if (window.emailjs) {
+        window.emailjs.init(env.NEXT_PUBLIC_EMAILJS_PUBLIC_KEY);
+        window.emailjs.send(env.NEXT_PUBLIC_EMAILJS_SERVICE_ID, env.NEXT_PUBLIC_EMAILJS_TEMPLATE_ID, {
+          from_name: "Ramya Radha Boutique",
+          reply_to: "no-reply@example.com",
+          to_email: email,
+          message: `Your order (${id}) was successful! Thank you so much.`
+        }).catch(console.error);
+    }
+  }
+
+  revealSetup();
 }
 
 function setupNav() {
@@ -1808,6 +2201,13 @@ function setupNav() {
     btn.addEventListener("click", () => {
       const expanded = btn.getAttribute("aria-expanded") === "true";
       btn.setAttribute("aria-expanded", String(!expanded));
+    });
+  });
+
+  // Ensure menu closes on any link click (Vanilla alternative to setMenuOpen(false))
+  $$(".nav__link").forEach((link) => {
+    link.addEventListener("click", () => {
+      closeNavIfMobile();
     });
   });
 }
@@ -1839,10 +2239,8 @@ function setupGlobalUI() {
   $("#checkoutBtn").addEventListener("click", () => {
     const cart = getCart();
     if (cartCount(cart) === 0) return toast("Your cart is empty.");
-    toast("Checkout is a demo. Thanks for shopping!");
-    setCart({});
-    renderCart();
     closeCart();
+    location.hash = "#/checkout";
   });
 
   document.addEventListener("keydown", (e) => {
@@ -1932,9 +2330,9 @@ function setupAccountMenu() {
     .catch(() => render(null));
 }
 
-function main() {
+async function main() {
   ensureSeed();
-  initProductsCloud();
+  await initProductsCloud();
   setupNav();
   setupGlobalUI();
   syncCartUI();

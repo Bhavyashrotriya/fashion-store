@@ -14,6 +14,7 @@ import { createClient } from "@supabase/supabase-js";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import Razorpay from "razorpay";
 
 dotenv.config();
 
@@ -165,7 +166,12 @@ function maskIdentifier(kind, value) {
 
 const app = express();
 app.disable("x-powered-by");
-app.use(helmet());
+app.use(
+  helmet({
+    contentSecurityPolicy: false,
+    crossOriginResourcePolicy: false,
+  })
+);
 app.use(express.json({ limit: "1mb" }));
 app.use(cookieParser());
 
@@ -374,11 +380,12 @@ app.get("/api/products", async (req, res) => {
 
 app.post("/api/products", authMiddleware, adminOnly, async (req, res) => {
   if (!supabase) return res.status(501).json({ ok: false, error: "Database not configured" });
-  const { name, price, category, description, image_url } = req.body || {};
+  const { name, price, category, description, image_url, tags } = req.body || {};
 
   const n = String(name || "").trim();
   const d = String(description || "").trim();
   const c = String(category || "").trim();
+  const t = Array.isArray(tags) ? tags : [];
   const p = Number(price);
   const img = String(image_url || "").trim();
 
@@ -386,7 +393,7 @@ app.post("/api/products", authMiddleware, adminOnly, async (req, res) => {
 
   const { data, error } = await supabase
     .from("products")
-    .insert([{ name: n, price: Math.round(p), category: c, description: d, image_url: img }])
+    .insert([{ name: n, price: Math.round(p), category: c, tags: t, description: d, image_url: img }])
     .select("*")
     .single();
   if (error) return res.status(500).json({ ok: false, error: "Failed to create product" });
@@ -402,6 +409,7 @@ app.put("/api/products/:id", authMiddleware, adminOnly, async (req, res) => {
   if (req.body?.category != null) patch.category = String(req.body.category).trim();
   if (req.body?.description != null) patch.description = String(req.body.description).trim();
   if (req.body?.image_url != null) patch.image_url = String(req.body.image_url).trim();
+  if (req.body?.tags != null) patch.tags = Array.isArray(req.body.tags) ? req.body.tags : [];
 
   const { data, error } = await supabase.from("products").update(patch).eq("id", id).select("*").single();
   if (error) return res.status(500).json({ ok: false, error: "Failed to update product" });
@@ -438,9 +446,127 @@ app.post("/api/cloudinary/upload", authMiddleware, adminOnly, upload.single("ima
   uploadStream.end(req.file.buffer);
 });
 
+// Gallery API to fetch all cloudinary images
+app.get("/api/cloudinary/gallery", async (req, res) => {
+  if (!CLOUDINARY_ENABLED) {
+    return res.status(501).json({ ok: false, error: "Cloudinary not configured" });
+  }
+  try {
+    const result = await cloudinary.search
+      .expression('folder:ramya-radha-boutique/products OR folder:fashion-store')
+      .sort_by('created_at', 'desc')
+      .max_results(30)
+      .execute();
+    return res.json({ ok: true, images: result.resources.map(r => r.secure_url) });
+  } catch (err) {
+    console.error("Cloudinary Search Error:", err);
+    return res.status(500).json({ ok: false, error: "Failed to fetch gallery" });
+  }
+});
+
 // Protected example (optional)
 app.get("/api/private", authMiddleware, (req, res) => {
   res.json({ ok: true, user: req.user });
+});
+
+// === RAZORPAY & ORDERS API ===
+const razorpay = new Razorpay({
+  key_id: process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID || "test",
+  key_secret: process.env.RAZORPAY_KEY_SECRET || "test",
+});
+
+app.post("/api/create-order", async (req, res) => {
+  try {
+    const { amount, receipt } = req.body;
+    if (!amount || amount <= 0) return res.status(400).json({ ok: false, error: "Invalid amount" });
+
+    const options = {
+      amount: Math.round(amount * 100), // amount in the smallest currency unit (paise)
+      currency: "INR",
+      receipt: receipt || crypto.randomBytes(8).toString("hex"),
+    };
+
+    const order = await razorpay.orders.create(options);
+    res.json({ ok: true, order });
+  } catch (error) {
+    console.error("Razorpay Create Order Error:", error);
+    res.status(500).json({ ok: false, error: "Failed to create order" });
+  }
+});
+
+app.post("/api/capture-order", async (req, res) => {
+  if (!supabase) return res.status(501).json({ ok: false, error: "Database not configured" });
+
+  try {
+    const { 
+      razorpay_order_id, 
+      razorpay_payment_id, 
+      razorpay_signature,
+      customerDetails,
+      items,
+      amount
+    } = req.body;
+
+    // Verify Signature
+    const secret = process.env.RAZORPAY_KEY_SECRET || "test";
+    const body = razorpay_order_id + "|" + razorpay_payment_id;
+    const expectedSignature = crypto.createHmac("sha256", secret).update(body.toString()).digest("hex");
+
+    if (expectedSignature !== razorpay_signature) {
+      return res.status(400).json({ ok: false, error: "Invalid signature" });
+    }
+
+    // Save to Supabase
+    const { name, email, phone, address } = customerDetails || {};
+    
+    const { data: insertedOrder, error: insertError } = await supabase.from("orders").insert([{
+      customer_name: name || "Unknown",
+      customer_email: email || "unknown@example.com",
+      customer_phone: phone || "0000000000",
+      delivery_address: address || {},
+      items: items || [],
+      amount: amount || 0,
+      razorpay_order_id,
+      razorpay_payment_id,
+      status: "paid"
+    }]).select("*").single();
+
+    if (insertError) {
+      console.error("Supabase Save Order Error:", insertError);
+      return res.status(500).json({ ok: false, error: "Payment successful but failed to save order" });
+    }
+
+    res.json({ ok: true, savedOrder: insertedOrder });
+  } catch (error) {
+    console.error("Capture Order Error:", error);
+    res.status(500).json({ ok: false, error: "Internal server error" });
+  }
+});
+
+app.get("/api/orders", authMiddleware, adminOnly, async (req, res) => {
+  if (!supabase) return res.status(501).json({ ok: false, error: "Database not configured" });
+
+  try {
+    const { data, error } = await supabase.from("orders").select("*").order("created_at", { ascending: false });
+    if (error) throw error;
+    res.json({ ok: true, orders: data || [] });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: "Failed to fetch orders" });
+  }
+});
+
+// Expose public .env variables to frontend
+app.get("/env-config.js", (req, res) => {
+  res.type("application/javascript");
+  res.send(`
+    window.__ENV__ = {
+      NEXT_PUBLIC_EMAILJS_SERVICE_ID: "${process.env.NEXT_PUBLIC_EMAILJS_SERVICE_ID || ""}",
+      NEXT_PUBLIC_EMAILJS_TEMPLATE_ID: "${process.env.NEXT_PUBLIC_EMAILJS_TEMPLATE_ID || ""}",
+      NEXT_PUBLIC_EMAILJS_PUBLIC_KEY: "${process.env.NEXT_PUBLIC_EMAILJS_PUBLIC_KEY || ""}",
+      NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME: "${process.env.NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME || process.env.CLOUDINARY_CLOUD_NAME || ""}",
+      NEXT_PUBLIC_RAZORPAY_KEY_ID: "${process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID || ""}"
+    };
+  `);
 });
 
 // Serve frontend
